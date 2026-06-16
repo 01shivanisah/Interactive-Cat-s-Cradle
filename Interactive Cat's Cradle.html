@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interactive Cat's Cradle - Hand Tracking</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/hands.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Arial', sans-serif;
+            background: #000;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            overflow: hidden;
+        }
+        
+        #container {
+            position: relative;
+            width: 100%;
+            height: 100%;
+        }
+        
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+
+        #video {
+            display: none;
+        }
+        
+        #info {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: #00ffff;
+            font-size: 14px;
+            font-family: 'Courier New', monospace;
+            z-index: 100;
+            text-shadow: 0 0 10px rgba(0, 255, 255, 0.8);
+        }
+        
+        .status {
+            margin-bottom: 10px;
+            padding: 5px 10px;
+            background: rgba(0, 0, 0, 0.6);
+            border-left: 3px solid #ff00ff;
+        }
+    </style>
+</head>
+<body>
+    <video id="video" autoplay playsinline></video>
+    <div id="container">
+        <canvas id="canvas"></canvas>
+        <div id="info">
+            <div class="status" id="status">Initializing...</div>
+            <div class="status" id="hands-info">Hands: 0</div>
+            <div class="status" id="fps">FPS: 0</div>
+        </div>
+    </div>
+
+    <script>
+        // Configuration
+        const CONFIG = {
+            GLOW_STRENGTH: 25,
+            HAND_COLORS: {
+                left: { primary: [0, 255, 255], secondary: [0, 200, 255] },     // Cyan
+                right: { primary: [255, 0, 255], secondary: [200, 0, 255] }    // Magenta
+            },
+            STRING_COLOR: [255, 255, 0],  // Yellow
+            JOINT_RADIUS: 5,
+            CONNECTION_WIDTH: 2,
+            ELASTICITY: 0.15,
+            RELAXATION_SPEED: 0.95
+        };
+
+        // Finger joint connections for visualization
+        const FINGER_CONNECTIONS = [
+            [0, 1], [1, 2], [2, 3], [3, 4],           // Thumb
+            [0, 5], [5, 6], [6, 7], [7, 8],           // Index
+            [0, 9], [9, 10], [10, 11], [11, 12],      // Middle
+            [0, 13], [13, 14], [14, 15], [15, 16],    // Ring
+            [0, 17], [17, 18], [18, 19], [19, 20]     // Pinky
+        ];
+
+        // Fingertip indices
+        const FINGERTIPS = [4, 8, 12, 16, 20];
+
+        let hands;
+        let canvas;
+        let ctx;
+        let video;
+        let results = {};
+        let lastFrameTime = 0;
+        let frameCount = 0;
+        let fps = 0;
+        let videoReady = false;
+        let animationId;
+
+        async function initialize() {
+            try {
+                canvas = document.getElementById('canvas');
+                ctx = canvas.getContext('2d');
+                video = document.getElementById('video');
+
+                // Request camera access
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { 
+                        facingMode: 'user',
+                        width: { ideal: 1280 },
+                        height: { ideal: 720 }
+                    },
+                    audio: false
+                });
+
+                video.srcObject = stream;
+                
+                video.onloadedmetadata = () => {
+                    console.log('Video metadata loaded:', video.videoWidth, 'x', video.videoHeight);
+                    videoReady = true;
+                    canvas.width = window.innerWidth;
+                    canvas.height = window.innerHeight;
+                    document.getElementById('status').textContent = 'Camera: Active';
+                    document.getElementById('status').style.borderLeftColor = '#00ff00';
+                    startMediaPipe();
+                };
+
+            } catch (err) {
+                console.error('Camera error:', err);
+                document.getElementById('status').textContent = `Camera Error: ${err.message}`;
+                document.getElementById('status').style.borderLeftColor = '#ff0000';
+            }
+        }
+
+        async function startMediaPipe() {
+            try {
+                hands = new Hands({
+                    locateFile: (file) => {
+                        return `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/${file}`;
+                    }
+                });
+
+                hands.setOptions({
+                    maxNumHands: 2,
+                    modelComplexity: 1,
+                    minDetectionConfidence: 0.5,
+                    minTrackingConfidence: 0.5
+                });
+
+                hands.onResults(onHandsResults);
+
+                console.log('MediaPipe initialized');
+                animate();
+            } catch (err) {
+                console.error('MediaPipe error:', err);
+                document.getElementById('status').textContent = `MediaPipe Error: ${err.message}`;
+                document.getElementById('status').style.borderLeftColor = '#ff0000';
+            }
+        }
+
+        function onHandsResults(result) {
+            results = result;
+        }
+
+        async function animate() {
+            if (!videoReady || !video.videoWidth) {
+                animationId = requestAnimationFrame(animate);
+                return;
+            }
+
+            // Update FPS counter
+            frameCount++;
+            const now = performance.now();
+            if (now - lastFrameTime >= 1000) {
+                fps = frameCount;
+                frameCount = 0;
+                lastFrameTime = now;
+                document.getElementById('fps').textContent = `FPS: ${fps}`;
+            }
+
+            // Process with MediaPipe
+            if (hands) {
+                await hands.send({ image: video });
+            }
+
+            // Draw frame
+            draw();
+
+            animationId = requestAnimationFrame(animate);
+        }
+
+        function draw() {
+            const videoWidth = video.videoWidth;
+            const videoHeight = video.videoHeight;
+
+            // Resize canvas if needed
+            if (canvas.width !== window.innerWidth || canvas.height !== window.innerHeight) {
+                canvas.width = window.innerWidth;
+                canvas.height = window.innerHeight;
+            }
+
+            // Calculate scaling
+            const scale = Math.min(canvas.width / videoWidth, canvas.height / videoHeight);
+            const scaledWidth = videoWidth * scale;
+            const scaledHeight = videoHeight * scale;
+            const x = (canvas.width - scaledWidth) / 2;
+            const y = (canvas.height - scaledHeight) / 2;
+
+            // Clear canvas
+            ctx.fillStyle = '#000000';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // Draw video mirrored
+            ctx.save();
+            ctx.translate(x + scaledWidth, y);
+            ctx.scale(-1, 1);
+            ctx.drawImage(video, 0, 0, scaledWidth, scaledHeight);
+            ctx.restore();
+
+            // Draw hand tracking
+            if (results.multiHandLandmarks && results.multiHandedness) {
+                updateHandsInfo();
+                
+                // Draw connections between fingers within each hand
+                drawHandSkeleton(x, y, scale);
+                
+                // Draw glowing finger joints
+                drawFingerJoints(x, y, scale);
+                
+                // Draw strings connecting fingertips between hands
+                if (results.multiHandLandmarks.length === 2) {
+                    drawCradleStrings(x, y, scale);
+                }
+            }
+        }
+
+        function updateHandsInfo() {
+            const handCount = results.multiHandLandmarks.length;
+            document.getElementById('hands-info').textContent = `Hands: ${handCount}`;
+        }
+
+        function drawHandSkeleton(offsetX, offsetY, scale) {
+            ctx.save();
+            ctx.lineWidth = 2;
+            ctx.globalAlpha = 0.8;
+
+            for (let h = 0; h < results.multiHandLandmarks.length; h++) {
+                const landmarks = results.multiHandLandmarks[h];
+                const handedness = results.multiHandedness[h].label;
+                const color = handedness === 'Right' ? CONFIG.HAND_COLORS.right : CONFIG.HAND_COLORS.left;
+
+                // Draw finger connections
+                for (const [start, end] of FINGER_CONNECTIONS) {
+                    const startLandmark = landmarks[start];
+                    const endLandmark = landmarks[end];
+
+                    const startX = offsetX + (1 - startLandmark.x) * video.videoWidth * scale;
+                    const startY = offsetY + startLandmark.y * video.videoHeight * scale;
+                    const endX = offsetX + (1 - endLandmark.x) * video.videoWidth * scale;
+                    const endY = offsetY + endLandmark.y * video.videoHeight * scale;
+
+                    // Draw with gradient effect
+                    const gradient = ctx.createLinearGradient(startX, startY, endX, endY);
+                    gradient.addColorStop(0, `rgba(${color.primary[0]}, ${color.primary[1]}, ${color.primary[2]}, 1)`);
+                    gradient.addColorStop(1, `rgba(${color.secondary[0]}, ${color.secondary[1]}, ${color.secondary[2]}, 1)`);
+                    ctx.strokeStyle = gradient;
+
+                    ctx.beginPath();
+                    ctx.moveTo(startX, startY);
+                    ctx.lineTo(endX, endY);
+                    ctx.stroke();
+                }
+            }
+            ctx.restore();
+        }
+
+        function drawFingerJoints(offsetX, offsetY, scale) {
+            for (let h = 0; h < results.multiHandLandmarks.length; h++) {
+                const landmarks = results.multiHandLandmarks[h];
+                const handedness = results.multiHandedness[h].label;
+                const color = handedness === 'Right' ? CONFIG.HAND_COLORS.right : CONFIG.HAND_COLORS.left;
+
+                for (let i = 0; i < landmarks.length; i++) {
+                    const landmark = landmarks[i];
+                    const x = offsetX + (1 - landmark.x) * video.videoWidth * scale;
+                    const y = offsetY + landmark.y * video.videoHeight * scale;
+
+                    // Draw glow effect
+                    drawGlowingDot(x, y, color, CONFIG.GLOW_STRENGTH);
+                    
+                    // Highlight fingertips
+                    if (FINGERTIPS.includes(i)) {
+                        drawGlowingDot(x, y, color, CONFIG.GLOW_STRENGTH * 1.5);
+                    }
+                }
+            }
+        }
+
+        function drawGlowingDot(x, y, color, glowSize) {
+            ctx.save();
+            
+            // Draw glow layers
+            for (let i = glowSize; i > 0; i -= 3) {
+                const alpha = (1 - i / glowSize) * 0.3;
+                ctx.fillStyle = `rgba(${color.primary[0]}, ${color.primary[1]}, ${color.primary[2]}, ${alpha})`;
+                ctx.beginPath();
+                ctx.arc(x, y, i, 0, Math.PI * 2);
+                ctx.fill();
+            }
+            
+            // Draw core dot
+            ctx.fillStyle = `rgb(${color.primary[0]}, ${color.primary[1]}, ${color.primary[2]})`;
+            ctx.beginPath();
+            ctx.arc(x, y, CONFIG.JOINT_RADIUS, 0, Math.PI * 2);
+            ctx.fill();
+            
+            ctx.restore();
+        }
+
+        function drawCradleStrings(offsetX, offsetY, scale) {
+            const leftHand = results.multiHandLandmarks[0];
+            const rightHand = results.multiHandLandmarks[1];
+
+            ctx.save();
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+
+            // Connect each fingertip
+            for (const tipIndex of FINGERTIPS) {
+                const leftTip = leftHand[tipIndex];
+                const rightTip = rightHand[tipIndex];
+
+                const x1 = offsetX + (1 - leftTip.x) * video.videoWidth * scale;
+                const y1 = offsetY + leftTip.y * video.videoHeight * scale;
+                const x2 = offsetX + (1 - rightTip.x) * video.videoWidth * scale;
+                const y2 = offsetY + rightTip.y * video.videoHeight * scale;
+
+                // Calculate distance for elastic effect
+                const dx = x2 - x1;
+                const dy = y2 - y1;
+                const distance = Math.sqrt(dx * dx + dy * dy);
+                const maxDistance = Math.sqrt(canvas.width * canvas.width + canvas.height * canvas.height) * 0.5;
+                const distanceRatio = Math.min(distance / maxDistance, 1);
+
+                // Adjust thickness based on distance
+                const thickness = CONFIG.CONNECTION_WIDTH + distanceRatio * 3;
+                
+                // Color gradient based on distance
+                const hue = 60 * (1 - distanceRatio);  // Yellow to different hue
+                const color = hslToRgb(hue / 360, 1, 0.5);
+
+                // Draw string with glow
+                drawGlowingLine(x1, y1, x2, y2, thickness, color, CONFIG.GLOW_STRENGTH * 1.2);
+            }
+
+            ctx.restore();
+        }
+
+        function drawGlowingLine(x1, y1, x2, y2, thickness, color, glowSize) {
+            // Draw glow layers
+            for (let i = glowSize; i > 0; i -= 2) {
+                const alpha = (1 - i / glowSize) * 0.2;
+                ctx.strokeStyle = `rgba(${color[0]}, ${color[1]}, ${color[2]}, ${alpha})`;
+                ctx.lineWidth = thickness + i;
+                ctx.beginPath();
+                ctx.moveTo(x1, y1);
+                ctx.lineTo(x2, y2);
+                ctx.stroke();
+            }
+            
+            // Draw main line
+            ctx.strokeStyle = `rgb(${color[0]}, ${color[1]}, ${color[2]})`;
+            ctx.lineWidth = thickness;
+            ctx.beginPath();
+            ctx.moveTo(x1, y1);
+            ctx.lineTo(x2, y2);
+            ctx.stroke();
+        }
+
+        function hslToRgb(h, s, l) {
+            let r, g, b;
+
+            if (s === 0) {
+                r = g = b = l;
+            } else {
+                const hue2rgb = (p, q, t) => {
+                    if (t < 0) t += 1;
+                    if (t > 1) t -= 1;
+                    if (t < 1/6) return p + (q - p) * 6 * t;
+                    if (t < 1/2) return q;
+                    if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
+                    return p;
+                };
+
+                const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+                const p = 2 * l - q;
+                r = hue2rgb(p, q, h + 1/3);
+                g = hue2rgb(p, q, h);
+                b = hue2rgb(p, q, h - 1/3);
+            }
+
+            return [
+                Math.round(r * 255),
+                Math.round(g * 255),
+                Math.round(b * 255)
+            ];
+        }
+
+        window.addEventListener('resize', () => {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        });
+
+        // Start initialization
+        initialize();
+    </script>
+</body>
+</html>
